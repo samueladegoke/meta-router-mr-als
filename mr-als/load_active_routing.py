@@ -37,9 +37,10 @@ Artifact schema (artifacts/candidate-*.json):
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-from typing import Any, Optional
+
+from experience_hygiene import MIN_ELIGIBLE_OUTCOMES
+
 
 _BASE = Path(__file__).parent.parent
 _DEPLOYMENT_STATE = _BASE / "experience" / "deployment_state.json"
@@ -161,7 +162,7 @@ def promote_artifact(
         metrics = artifact.get("metrics", {})
         shadow_eval_n = metrics.get("shadow_eval_n")
         eligible_outcomes = 0 if eligible_outcomes is None else eligible_outcomes
-        promotion_ready = bool(metrics.get("gate_passes")) and eligible_outcomes >= 50
+        promotion_ready = bool(metrics.get("gate_passes")) and eligible_outcomes >= MIN_ELIGIBLE_OUTCOMES
         evidence_maturity = (
             "production-ready"
             if promotion_ready

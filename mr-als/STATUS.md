@@ -34,12 +34,12 @@ auto_generated: true
 
 | Component | Status | Evidence |
 |---|---|---|
-| Hermes meta-router server | ✅ LIVE | /health returned status=ok on :3120 |
+| Hermes meta-router server | ✅ LIVE | /health returned status=ok and /classify matched the current bypass contract on :3120 |
 | OpenClaw meta-router plugin package | ✅ LIVE | openclaw plugins inspect meta-router -> Status: loaded |
-| routing_events.jsonl | ✅ LIVE | 168 events logged |
-| routing_outcomes.jsonl | ✅ LIVE | 17 outcomes logged (eligible: 3) |
-| Adaptive routing artifact | ✅ ACTIVE | active: candidate-0002 | rollout_mode=shadow; evidence_maturity=shadow-only |
-| Pareto frontier | ✅ LIVE | 1 member(s) |
+| routing_events.jsonl | ✅ LIVE | 238 events logged |
+| routing_outcomes.jsonl | ✅ LIVE | 34 outcomes logged (eligible: 19) |
+| Adaptive routing artifact | ✅ ACTIVE | active: candidate-0010 | rollout_mode=shadow; evidence_maturity=shadow-only |
+| Pareto frontier | ✅ LIVE | 4 member(s) |
 | Model insights artifact generation | ✅ LIVE | model_insights.json written |
 | Skill performance artifact generation | ✅ LIVE | skills_performance.json written |
 
@@ -47,7 +47,7 @@ auto_generated: true
 
 | Gap | Phase | Note |
 |---|---|---|
-| Adaptive-learning-ready dataset | Phase 4-7 | 3 eligible outcome-enriched production rows (minimum 50) |
+| Adaptive-learning-ready dataset | Phase 4-7 | 19 eligible outcome-enriched production rows (minimum 50) |
 | Promotion readiness | Phase 3-5 | rollout_mode=shadow; evidence_maturity=shadow-only; promotion_ready=false |
 
 ## Phase Progress
@@ -57,9 +57,9 @@ auto_generated: true
 | 0 | Status Reset | ✅ Done (2026-04-14) |
 | 1 | Unified Experience Plane | ✅ Live |
 | 2 | Outcome Enrichment | ✅ Live |
-| 3 | Deployable Routing Artifact | ✅ Active (candidate-0002) |
-| 4 | Real Optimizer Loop | 🟡 Bootstrap only (3/50 eligible) |
-| 5 | Shadow/Canary Gate | ✅ 3 evaluated |
+| 3 | Deployable Routing Artifact | ✅ Active (candidate-0010) |
+| 4 | Real Optimizer Loop | 🟡 Bootstrap only (19/50 eligible) |
+| 5 | Shadow/Canary Gate | ✅ 15 evaluated |
 | 6 | Model Learning Loop | ✅ Trustworthy |
 | 7 | Skill Learning Loop | ✅ Trustworthy |
 | 8 | OpenClaw Plugin Reality Fix | ✅ Loaded + shared-stream live |
@@ -68,16 +68,17 @@ auto_generated: true
 
 | Stream | Count |
 |---|---|
-| routing_events.jsonl | 168 |
-| routing_outcomes.jsonl | 17 |
-| eligible outcome-enriched production rows | 3 |
-| candidate artifacts | 3 (evaluated: 3) |
-| pareto frontier members | 1 |
-| openclaw-plugin event rows | 1 |
+| routing_events.jsonl | 238 |
+| routing_outcomes.jsonl | 34 |
+| eligible outcome-enriched production rows | 19 |
+| candidate artifacts | 15 (evaluated: 15) |
+| pareto frontier members | 4 |
+| openclaw-plugin event rows | 6 |
+| routed openclaw-plugin rows | 5 |
 
 ## Deployment Accountability
 
-- active_candidate_id: candidate-0002
+- active_candidate_id: candidate-0010
 - rollout_mode: shadow
 - evidence_maturity: shadow-only
 - promotion_ready: false

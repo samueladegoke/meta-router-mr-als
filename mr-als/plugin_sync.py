@@ -29,9 +29,9 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
-from experience_hygiene import load_joined_records, summarize_learning_dataset
+from experience_hygiene import MIN_ELIGIBLE_OUTCOMES, load_joined_records, summarize_learning_dataset
 
 MR_DIR = Path("/home/samade10/.openclaw/workspace/skills/maintainer/meta-router")
 ARTIFACTS_DIR = MR_DIR / "artifacts"
@@ -81,6 +81,26 @@ def _jsonl_source_counts(path: Path) -> dict[str, int]:
     return counts
 
 
+def _jsonl_routed_source_count(path: Path, source_name: str) -> int:
+    """Return count of non-bypassed rows for a specific source."""
+    if not path.exists():
+        return 0
+    count = 0
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if obj.get("source") != source_name:
+            continue
+        if obj.get("bypassed"):
+            continue
+        count += 1
+    return count
+
+
 def _openclaw_plugin_loaded() -> bool:
     """Return True when OpenClaw reports the meta-router plugin as loaded.
 
@@ -114,9 +134,46 @@ def _meta_router_server_healthy() -> bool:
     try:
         with urlopen("http://127.0.0.1:3120/health", timeout=2) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
-            return payload.get("status") == "ok"
+            if payload.get("status") != "ok":
+                return False
     except (URLError, TimeoutError, ValueError, OSError):
         return False
+
+    try:
+        req = Request(
+            "http://127.0.0.1:3120/classify",
+            data=json.dumps({"text": "ok", "source": "plugin-sync", "surface": "healthcheck"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urlopen(req, timeout=2) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (URLError, TimeoutError, ValueError, OSError):
+        return False
+
+    required_keys = {
+        "request_id",
+        "type",
+        "mode",
+        "confidence",
+        "directive",
+        "text_with_directive",
+        "primary",
+        "budget_multiplier",
+        "routing_artifact_version",
+        "bypassed",
+        "bypass_reason",
+    }
+    if not required_keys.issubset(payload):
+        return False
+    if payload.get("bypassed") is not True:
+        return False
+    if payload.get("bypass_reason") != "short-ack":
+        return False
+    if payload.get("directive") != "":
+        return False
+    if payload.get("text_with_directive") != "ok":
+        return False
+    return True
 
 
 def _count_candidates() -> tuple[int, int]:
@@ -157,6 +214,7 @@ def _derive_flags(state: dict) -> dict[str, bool]:
 
     active = deploy.get("active_candidate_id", "static-default")
     openclaw_plugin_events = source_counts.get("openclaw-plugin", 0)
+    openclaw_plugin_routed_rows = state.get("openclaw_plugin_routed_rows", 0)
     eligible_outcomes = experience_summary.get("n_eligible_outcomes", 0)
 
     return {
@@ -174,7 +232,7 @@ def _derive_flags(state: dict) -> dict[str, bool]:
         "skill_learning_live": has_skills,
         "promotion_ready": bool(deploy.get("promotion_ready", False)) and experience_summary.get("promotion_ready", False),
         "openclaw_plugin_loaded": plugin_loaded,
-        "openclaw_shared_stream_live": openclaw_plugin_events > 0,
+        "openclaw_shared_stream_live": openclaw_plugin_routed_rows > 0,
     }
 
 
@@ -225,6 +283,7 @@ def _build_status_md(flags: dict, state: dict) -> str:
     plugin_loaded = flags["openclaw_plugin_loaded"]
     source_counts = state["source_counts"]
     openclaw_plugin_events = source_counts.get("openclaw-plugin", 0)
+    openclaw_plugin_routed_rows = state.get("openclaw_plugin_routed_rows", 0)
     experience_summary = state.get("experience_summary", {})
     eligible_outcomes = experience_summary.get("n_eligible_outcomes", 0)
     min_eligible = experience_summary.get("min_eligible_outcomes", 50)
@@ -235,7 +294,7 @@ def _build_status_md(flags: dict, state: dict) -> str:
 
     live_rows = []
     if flags["routing_live"]:
-        live_rows.append("| Hermes meta-router server | ✅ LIVE | /health returned status=ok on :3120 |")
+        live_rows.append("| Hermes meta-router server | ✅ LIVE | /health returned status=ok and /classify matched the current bypass contract on :3120 |")
     if plugin_loaded:
         live_rows.append("| OpenClaw meta-router plugin package | ✅ LIVE | openclaw plugins inspect meta-router -> Status: loaded |")
     if flags["experience_logging_live"]:
@@ -255,7 +314,7 @@ def _build_status_md(flags: dict, state: dict) -> str:
 
     not_live_rows = []
     if not flags["routing_live"]:
-        not_live_rows.append("| Hermes meta-router server | Phase 1 | /health is not currently healthy on :3120 |")
+        not_live_rows.append("| Hermes meta-router server | Phase 1 | /health or /classify contract is not currently healthy on :3120 |")
     if eligible_outcomes < min_eligible:
         not_live_rows.append(
             f"| Adaptive-learning-ready dataset | Phase 4-7 | {eligible_outcomes} eligible outcome-enriched production rows (minimum {min_eligible}) |"
@@ -267,7 +326,7 @@ def _build_status_md(flags: dict, state: dict) -> str:
     if not flags["openclaw_shared_stream_live"]:
         if plugin_loaded:
             not_live_rows.append(
-                f"| OpenClaw shared ALS stream parity | Phase 8 | Plugin package is loaded, but routing_events.jsonl has {openclaw_plugin_events} `openclaw-plugin` rows |"
+                f"| OpenClaw shared ALS stream parity | Phase 8 | Plugin package is loaded, but routing_events.jsonl has {openclaw_plugin_routed_rows} routed `openclaw-plugin` rows ({openclaw_plugin_events} total rows) |"
             )
         else:
             not_live_rows.append("| OpenClaw meta-router plugin package | Phase 8 | openclaw plugins inspect meta-router does not report Status: loaded |")
@@ -327,6 +386,7 @@ auto_generated: true
 | candidate artifacts | {n_cands} (evaluated: {n_eval}) |
 | pareto frontier members | {len(frontier_ids)} |
 | openclaw-plugin event rows | {openclaw_plugin_events} |
+| routed openclaw-plugin rows | {openclaw_plugin_routed_rows} |
 
 ## Deployment Accountability
 
@@ -346,13 +406,14 @@ auto_generated: true
 def run(dry_run: bool = False, report: bool = False) -> dict:
     """Sync STATUS.md and write plugin_report.json."""
     joined_records = load_joined_records(EVENTS_JSONL, OUTCOMES_JSONL)
-    experience_summary = summarize_learning_dataset(joined_records, min_eligible_outcomes=50)
+    experience_summary = summarize_learning_dataset(joined_records, min_eligible_outcomes=MIN_ELIGIBLE_OUTCOMES)
     state = {
         "n_events":          _count_jsonl(EVENTS_JSONL),
         "n_outcomes":        _count_jsonl(OUTCOMES_JSONL),
         "deployment":        _read_json(DEPLOYMENT_STATE),
         "frontier":          _read_json(PARETO_FRONTIER),
         "source_counts":     _jsonl_source_counts(EVENTS_JSONL),
+        "openclaw_plugin_routed_rows": _jsonl_routed_source_count(EVENTS_JSONL, "openclaw-plugin"),
         "openclaw_plugin_loaded": _openclaw_plugin_loaded(),
         "has_model_insights": MODEL_INSIGHTS.exists(),
         "has_skills_perf":   SKILLS_PERF.exists(),
@@ -375,6 +436,7 @@ def run(dry_run: bool = False, report: bool = False) -> dict:
             "n_evaluated":  state["n_evaluated"],
             "frontier_size": len(state["frontier"].get("frontier", [])),
             "openclaw_plugin_event_rows": state["source_counts"].get("openclaw-plugin", 0),
+            "openclaw_plugin_routed_rows": state.get("openclaw_plugin_routed_rows", 0),
         },
         "experience_summary": experience_summary,
         "active_candidate_id": state["deployment"].get("active_candidate_id", "static-default"),

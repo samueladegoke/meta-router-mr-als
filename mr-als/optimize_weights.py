@@ -21,11 +21,11 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from experience_hygiene import load_joined_records, summarize_learning_dataset, ELIGIBILITY_POLICY_VERSION
+from meta_router_rules import load_base_rules
 
 MR_DIR = Path("/home/samade10/.openclaw/workspace/skills/maintainer/meta-router")
 ARTIFACTS_DIR = MR_DIR / "artifacts"
@@ -33,22 +33,13 @@ EXP_DIR = MR_DIR / "experience"
 SHADOW_SET = EXP_DIR / "shadow_eval_set.json"
 OUTCOMES_JSONL = EXP_DIR / "routing_outcomes.jsonl"
 EVENTS_JSONL = EXP_DIR / "routing_events.jsonl"
-HERMES_GW = Path("/home/samade10/.hermes/hermes-agent")
 
-MIN_OUTCOMES = 50
+MIN_OUTCOMES = 15
 TYPES = ["code", "audit", "research", "production", "integration", "config", "design"]
 TOP_N_CANDIDATES = 3
 
 
-# ── Base rules loader ──────────────────────────────────────────────────────────
-
-def _load_base_rules():
-    sys.path.insert(0, str(HERMES_GW))
-    from gateway.meta_router import _RULES, _MODE_RULES  # type: ignore[attr-defined]
-    return _RULES, _MODE_RULES
-
-
-# ── JSONL loaders ──────────────────────────────────────────────────────────────
+# ── Shadow set loader ──────────────────────────────────────────────────────────
 
 def _count_outcomes() -> int:
     if not OUTCOMES_JSONL.exists():
@@ -296,7 +287,7 @@ def _make_artifact(cid: str, strategy: str, weight_adj: dict, shadow_acc: float)
 
 def run(force: bool = False, bootstrap: bool = False, dry_run: bool = False) -> dict:
     """Run Phase 4 optimizer. Returns dict with generated candidate info."""
-    rules, _ = _load_base_rules()
+    rules, _ = load_base_rules()
     shadow_entries = json.loads(SHADOW_SET.read_text())["entries"]
     joined_records, eligible_outcomes, eligibility_summary = _load_learning_records()
     n_outcomes_raw = len(joined_records)

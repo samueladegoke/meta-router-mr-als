@@ -90,7 +90,7 @@ def _trend(series: list[float]) -> str:
     return "stable"
 
 
-def analyze() -> dict:
+def analyze(dry_run: bool = False) -> dict:
     """
     Read routing_outcomes.jsonl and compute per-type skill performance metrics.
     Returns the full skills_performance dict.
@@ -164,8 +164,11 @@ def analyze() -> dict:
         "per_type": per_type,
     }
 
-    SKILLS_PERF.write_text(json.dumps(skills_perf, indent=2))
-    print(f"Wrote: {SKILLS_PERF}")
+    if dry_run:
+        print(f"[DRY-RUN] Would write: {SKILLS_PERF}")
+    else:
+        SKILLS_PERF.write_text(json.dumps(skills_perf, indent=2))
+        print(f"Wrote: {SKILLS_PERF}")
     return skills_perf
 
 
@@ -195,8 +198,9 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="MR-ALS Phase 7: Skill Performance Tracker")
     parser.add_argument("--report", action="store_true", help="Print summary table")
+    parser.add_argument("--dry-run", action="store_true", help="Simulate without writing skills_performance.json")
     args = parser.parse_args()
-    perf = analyze()
+    perf = analyze(dry_run=args.dry_run)
     if args.report:
         print_report(perf)
     else:

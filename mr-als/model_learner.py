@@ -24,13 +24,13 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean, stdev
 from typing import Optional
 
 from experience_hygiene import load_joined_records, summarize_learning_dataset
+from meta_router_rules import load_base_rules
 
 MR_DIR = Path("/home/samade10/.openclaw/workspace/skills/maintainer/meta-router")
 ARTIFACTS_DIR = MR_DIR / "artifacts"
@@ -39,19 +39,11 @@ SHADOW_SET = EXP_DIR / "shadow_eval_set.json"
 OUTCOMES_JSONL = EXP_DIR / "routing_outcomes.jsonl"
 EVENTS_JSONL = EXP_DIR / "routing_events.jsonl"
 INSIGHTS_FILE = EXP_DIR / "model_insights.json"
-HERMES_GW = Path("/home/samade10/.hermes/hermes-agent")
+
 
 TYPES = ["code", "audit", "research", "production", "integration", "config", "design"]
 LOW_QUALITY_THRESHOLD = 50.0   # outcome_quality below this is "poor"
 LOW_CONFIDENCE_THRESHOLD = 0.5 # routing confidence below this is "uncertain"
-
-
-# ── Base rules loader ──────────────────────────────────────────────────────────
-
-def _load_base_rules():
-    sys.path.insert(0, str(HERMES_GW))
-    from gateway.meta_router import _RULES, _MODE_RULES  # type: ignore[attr-defined]
-    return _RULES, _MODE_RULES
 
 
 # ── JSONL helpers ──────────────────────────────────────────────────────────────
@@ -295,13 +287,13 @@ def _write_model_candidate(strategy: str, weight_adj: dict) -> str:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def run(generate: bool = False, report: bool = False) -> dict:
+def run(generate: bool = False, report: bool = False, dry_run: bool = False) -> dict:
     """
     Run Phase 6 analysis. Returns insights dict.
     Writes experience/model_insights.json.
     Writes candidate artifact(s) if generate=True.
     """
-    rules, _ = _load_base_rules()
+    rules, _ = load_base_rules()
     shadow_entries = json.loads(SHADOW_SET.read_text())["entries"]
     joined_records = load_joined_records(EVENTS_JSONL, OUTCOMES_JSONL)
     eligibility_summary = summarize_learning_dataset(joined_records, min_eligible_outcomes=50)
@@ -319,9 +311,13 @@ def run(generate: bool = False, report: bool = False) -> dict:
     if generate and outcomes:
         cands = _generate_model_candidates(confusion, type_quality)
         for strategy, adj in cands:
-            cid = _write_model_candidate(strategy, adj)
+            if dry_run:
+                cid = f"dry-run-{strategy}"
+                print(f"  [model-learner][DRY-RUN] would write candidate: {strategy}")
+            else:
+                cid = _write_model_candidate(strategy, adj)
+                print(f"  [model-learner] wrote candidate: {cid} ({strategy})")
             generated_candidates.append(cid)
-            print(f"  [model-learner] wrote candidate: {cid} ({strategy})")
 
     insights = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -347,8 +343,11 @@ def run(generate: bool = False, report: bool = False) -> dict:
         "generated_candidates": generated_candidates,
     }
 
-    INSIGHTS_FILE.write_text(json.dumps(insights, indent=2))
-    print(f"Wrote: {INSIGHTS_FILE}")
+    if dry_run:
+        print(f"[DRY-RUN] Would write: {INSIGHTS_FILE}")
+    else:
+        INSIGHTS_FILE.write_text(json.dumps(insights, indent=2))
+        print(f"Wrote: {INSIGHTS_FILE}")
 
     if report:
         _print_report(insights)
@@ -378,8 +377,9 @@ def main():
     parser = argparse.ArgumentParser(description="MR-ALS Phase 6: Model Improvement Learner")
     parser.add_argument("--generate", action="store_true", help="Write improved candidate artifacts")
     parser.add_argument("--report", action="store_true", help="Print human-readable report")
+    parser.add_argument("--dry-run", action="store_true", help="Simulate without writing insights or candidates")
     args = parser.parse_args()
-    result = run(generate=args.generate, report=args.report)
+    result = run(generate=args.generate, report=args.report, dry_run=args.dry_run)
     if not args.report:
         print("\n" + json.dumps({"recommendations": result["recommendations"],
                                   "n_outcomes": result["n_outcomes"]}, indent=2))

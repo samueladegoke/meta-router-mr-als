@@ -117,3 +117,9 @@ def test_delivery_gate_failure_blocks_learning_eligibility_even_with_pass_pass()
 
     assert records[0]["eligible_for_learning"] is False
     assert "delivery_gate_failed" in records[0]["ineligible_reasons"]
+
+
+def test_default_learning_maturity_threshold_stays_at_50():
+    summary = hygiene.summarize_learning_dataset([])
+    assert summary["min_eligible_outcomes"] == 50
+    assert summary["promotion_ready"] is False

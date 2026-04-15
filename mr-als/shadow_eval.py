@@ -16,10 +16,11 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+from meta_router_rules import load_base_rules
 
 MR_DIR = Path("/home/samade10/.openclaw/workspace/skills/maintainer/meta-router")
 ARTIFACTS_DIR = MR_DIR / "artifacts"
@@ -27,16 +28,6 @@ EXP_DIR = MR_DIR / "experience"
 SCRIPTS_DIR = MR_DIR / "scripts"
 SHADOW_SET = EXP_DIR / "shadow_eval_set.json"
 DEPLOYMENT_STATE = EXP_DIR / "deployment_state.json"
-HERMES_GW = Path("/home/samade10/.hermes/hermes-agent")
-
-# ── Import base rules from meta_router ────────────────────────────────────────
-
-def _load_base_rules():
-    """Load _RULES and _MODE_RULES from meta_router.py."""
-    sys.path.insert(0, str(HERMES_GW))
-    from gateway.meta_router import _RULES, _MODE_RULES  # type: ignore[attr-defined]
-    return _RULES, _MODE_RULES
-
 
 # ── Adjusted classifier ────────────────────────────────────────────────────────
 
@@ -45,7 +36,7 @@ def classify_with_artifact(text: str, artifact: dict) -> dict:
     Classify text applying a candidate artifact's weight adjustments.
     Returns {"type": str, "mode": str, "confidence": float}.
     """
-    _RULES, _MODE_RULES = _load_base_rules()
+    _RULES, _MODE_RULES = load_base_rules()
     weight_adj = artifact.get("keyword_weight_adjustments", {})
     lower = text.lower()
 
@@ -179,22 +170,30 @@ def save_artifact(artifact: dict) -> None:
 def promote_artifact(candidate_id: str) -> None:
     """Write candidate_id as active in deployment_state.json."""
     from load_active_routing import promote_artifact as shared_promote_artifact
+    from experience_hygiene import MIN_ELIGIBLE_OUTCOMES, build_joined_records, read_jsonl, summarize_learning_dataset
 
     artifact = load_artifact(candidate_id)
+    try:
+        events = read_jsonl(EXP_DIR / "routing_events.jsonl")
+        outcomes = read_jsonl(EXP_DIR / "routing_outcomes.jsonl")
+        records = build_joined_records(events, outcomes)
+        n_eligible = summarize_learning_dataset(records).get("n_eligible_outcomes", 0)
+    except Exception:
+        n_eligible = 0
+    is_live = n_eligible >= MIN_ELIGIBLE_OUTCOMES
     ok = shared_promote_artifact(
         candidate_id,
         artifact,
-        rollout_mode="shadow",
-        activation_basis="shadow-eval",
-        eligible_outcomes=0,
+        rollout_mode="live" if is_live else "shadow",
+        activation_basis="live-data" if is_live else "shadow-eval",
+        eligible_outcomes=n_eligible,
     )
-    print(f"Promoted: {candidate_id} ({'ok' if ok else 'failed'})")
-
-
-# ── Main CLI ───────────────────────────────────────────────────────────────────
+    mode = "live" if is_live else "shadow"
+    result = "ok" if ok else "failed"
+    print(f"Promoted: {candidate_id} ({result}) [eligible={n_eligible}, mode={mode}]")
 
 def run(candidate_id: Optional[str] = None, promote: bool = False,
-        all_candidates: bool = False, baseline_only: bool = False) -> dict:
+        all_candidates: bool = False, baseline_only: bool = False, dry_run: bool = False) -> dict:
     """Run shadow evaluation. Returns results dict."""
     shadow_data = json.loads(SHADOW_SET.read_text())
     entries = shadow_data["entries"]
@@ -253,10 +252,16 @@ def run(candidate_id: Optional[str] = None, promote: bool = False,
         artifact["pareto_score"] = round(
             0.7 * metrics["accuracy"] + 0.2 * metrics["avg_confidence"] + 0.1 * metrics["coverage"], 4
         )
-        save_artifact(artifact)
+        if dry_run:
+            print(f"  [DRY-RUN] Would update artifact metrics for {cid}")
+        else:
+            save_artifact(artifact)
 
         if passes and promote:
-            promote_artifact(cid)
+            if dry_run:
+                print(f"  [DRY-RUN] Would promote: {cid}")
+            else:
+                promote_artifact(cid)
 
         results["candidates"][cid] = {
             "metrics": metrics,
@@ -275,6 +280,7 @@ def main():
     parser.add_argument("--all", action="store_true", dest="all_candidates",
                         help="Evaluate all candidate-*.json artifacts")
     parser.add_argument("--baseline", action="store_true", help="Only score baseline")
+    parser.add_argument("--dry-run", action="store_true", help="Simulate without writing artifacts or promotions")
     args = parser.parse_args()
 
     results = run(
@@ -282,6 +288,7 @@ def main():
         promote=args.promote,
         all_candidates=args.all_candidates,
         baseline_only=args.baseline,
+        dry_run=args.dry_run,
     )
     print("\n" + json.dumps(results, indent=2))
 

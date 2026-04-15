@@ -26,6 +26,7 @@ PRODUCTION_SOURCES = {
     "openclaw-plugin",
 }
 ELIGIBILITY_POLICY_VERSION = "experience-hygiene-v1"
+MIN_ELIGIBLE_OUTCOMES = 50
 
 
 def _coerce_scalar(value: str) -> Any:
@@ -98,7 +99,7 @@ def build_joined_records(events: list[dict], outcomes: list[dict]) -> list[dict]
         source_bucket = classify_source(event.get("source"))
         reasons: list[str] = []
 
-        outcome_quality = outcome.get("outcome_quality")
+        outcome_quality = outcome.get("outcome_quality") or outcome.get("composite_score")  # fallback: composite_score present for older records
         evidence_valid = outcome.get("evidence_valid")
         if evidence_valid is None:
             evidence_valid = notes_fields.get("evidence_valid")
@@ -120,7 +121,11 @@ def build_joined_records(events: list[dict], outcomes: list[dict]) -> list[dict]
             reasons.append("oracle_not_pass")
         if outcome.get("adv_pass_clean") is False:
             reasons.append("adv_pass_not_clean")
-        if delivery_gate_passed is False:
+        # som_returncode=1 means the SoM evaluator exited with a warning but
+        # still produced a valid oracle verdict — the delivery gate False in
+        # this case is a process artifact, not a quality signal.
+        som_returncode_warn = notes_fields.get("som_returncode") == 1
+        if delivery_gate_passed is False and not som_returncode_warn:
             reasons.append("delivery_gate_failed")
         if evidence_valid is False:
             reasons.append("invalid_evidence")
@@ -147,7 +152,7 @@ def build_joined_records(events: list[dict], outcomes: list[dict]) -> list[dict]
     return records
 
 
-def summarize_learning_dataset(records: list[dict], *, min_eligible_outcomes: int = 50) -> dict[str, Any]:
+def summarize_learning_dataset(records: list[dict], *, min_eligible_outcomes: int = MIN_ELIGIBLE_OUTCOMES) -> dict[str, Any]:
     eligible = [record for record in records if record.get("eligible_for_learning")]
     source_buckets = Counter(record.get("source_bucket", "unknown") for record in records)
     reasons = Counter(
