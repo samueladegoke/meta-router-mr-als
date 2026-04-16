@@ -119,7 +119,7 @@ def _openclaw_plugin_loaded() -> bool:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=8,
                 check=False,
             )
         except Exception:

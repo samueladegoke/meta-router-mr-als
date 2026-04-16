@@ -39,10 +39,14 @@ _RULES: list[tuple[Category, list[str]]] = [
         r"\bcompare\b", r"\banalys", r"\binvestigat", r"\blook.?up\b",
     ]),
     ("production", [
-        r"\bdeploy\b", r"\brelease\b", r"\brollout\b", r"\bprod\b",
+        r"\bdeploy\b", r"\brelease\b", r"\brollout\b",
+        r"\bprod\b", r"\bproduction\b",
         r"\bmonitor\b", r"\bdowntime\b", r"\bincident\b", r"\balert\b",
         r"\bpager\b", r"\bhotfix\b", r"\brollback\b", r"\bscale\b",
-        r"\bk8s\b", r"\bkubernetes\b", r"\bdocker\b", r"\bcicid\b",
+        r"\bk8s\b", r"\bkubernetes\b", r"\bdocker\b", r"\bcicd\b",
+        r"\bcutover\b", r"\blive_env\b", r"\bpagerduty\b", r"\boncall\b",
+        r"\bsla\b", r"\bpostmortem\b", r"\bfailover\b", r"\bcanary\b",
+        r"\bblue.?green\b", r"\bprod.deploy\b",
     ]),
     ("integration", [
         r"\bapi\b", r"\bwebhook\b", r"\bintegrat", r"\bconnect\b",
@@ -138,7 +142,17 @@ def classify(text: str) -> RouteResult:
             break
 
     directive = f"[META-ROUTER | {best_cat} | {mode}]"
-    return RouteResult(type=best_cat, mode=mode, confidence=confidence, directive=directive)
+    result = RouteResult(type=best_cat, mode=mode, confidence=confidence, directive=directive)
+    if result.confidence < 0.5:
+        try:
+            from gateway.meta_router_llm import llm_classify
+        except Exception:
+            llm_classify = None
+        if llm_classify is not None:
+            llm_result = llm_classify(text, result)
+            if llm_result is not None:
+                return llm_result
+    return result
 
 
 def prepend_directive(text: str, result: RouteResult) -> str:

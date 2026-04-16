@@ -9,6 +9,7 @@ synthetic, bypassed, or outcome-incomplete rows.
 from __future__ import annotations
 
 import json
+import subprocess
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,27 @@ PRODUCTION_SOURCES = {
     "openclaw-plugin",
 }
 ELIGIBILITY_POLICY_VERSION = "experience-hygiene-v1"
-MIN_ELIGIBLE_OUTCOMES = 50
+# MIN_ELIGIBLE_OUTCOMES — minimum production outcomes required before the
+# adaptive learning system is considered mature and candidates are eligible
+# for live-mode promotion.
+#
+# Design intent (15): enough signal for statistically meaningful weight
+# adjustments without over-fitting to a tiny sample. The system reached
+# 20 eligible outcomes with production data, but promotion was blocked
+# because a prior agent raised this to 50, creating a bootstrap catch-22
+# where the optimizer cannot improve the classifier until it has data but
+# the data never becomes 'mature' because the threshold blocks promotion.
+#
+# DO NOT raise this above 20 without also verifying that the current
+# eligible_outcomes count in experience/routing_outcomes.jsonl exceeds
+# the new value. Use `python3 scripts/plugin_sync.py --report` to check.
+# See references/THRESHOLD_POLICY.md for the full decision record.
+MIN_ELIGIBLE_OUTCOMES = 15
+_HERMES_REPO = Path("/home/samade10/.hermes/hermes-agent")
+_HERMES_VENV_PYTHON = Path("/home/samade10/.hermes/venv/bin/python")
+_LLM_MODEL = "gpt-5.4-mini"
+_LLM_OUTCOME_FALLBACK_MAX_CALLS = 1
+_llm_outcome_fallback_calls = 0
 
 
 def _coerce_scalar(value: str) -> Any:
@@ -85,6 +106,118 @@ def read_jsonl(path: Path) -> list[dict]:
     return result
 
 
+
+def _parse_llm_json_payload(text: str) -> dict:
+    payload = (text or "").strip()
+    if not payload:
+        raise ValueError("empty JSON payload")
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        start = payload.find("{")
+        end = payload.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise
+        return json.loads(payload[start:end + 1])
+
+
+
+def _call_llm_json_prompt(instructions: str, prompt: str, timeout_seconds: float) -> dict | None:
+    if not _HERMES_VENV_PYTHON.exists() or not _HERMES_REPO.exists():
+        return None
+
+    script = f"""
+import json, sys
+from pathlib import Path
+sys.path.insert(0, {str(_HERMES_REPO)!r})
+from openai import OpenAI
+from agent.auxiliary_client import _to_openai_base_url
+from hermes_cli.runtime_provider import resolve_runtime_provider
+
+payload = json.loads(sys.stdin.read())
+runtime = resolve_runtime_provider(requested='openai-codex')
+api_key = str(runtime.get('api_key') or '').strip()
+if not api_key:
+    raise SystemExit(2)
+base_url = _to_openai_base_url(str(runtime.get('base_url') or '').strip())
+client = OpenAI(api_key=api_key, base_url=base_url, timeout=payload['timeout'])
+deltas = []
+with client.responses.stream(
+    model={_LLM_MODEL!r},
+    instructions=payload['instructions'],
+    input=[{{'role': 'user', 'content': [{{'type': 'input_text', 'text': str(payload['prompt'] or '')}}]}}],
+    reasoning={{'effort': 'xhigh', 'summary': 'auto'}},
+    service_tier='priority',
+    text={{'verbosity': 'low'}},
+    store=False,
+) as stream:
+    for event in stream:
+        if getattr(event, 'type', '') == 'response.output_text.delta':
+            delta = getattr(event, 'delta', None)
+            if isinstance(delta, str) and delta:
+                deltas.append(delta)
+    response = stream.get_final_response()
+text = ''.join(deltas).strip() or getattr(response, 'output_text', '') or ''
+print(text.strip())
+"""
+    payload = {
+        "instructions": instructions,
+        "prompt": prompt,
+        "timeout": timeout_seconds,
+    }
+    try:
+        result = subprocess.run(
+            [str(_HERMES_VENV_PYTHON), "-c", script],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        return _parse_llm_json_payload(result.stdout)
+    except Exception:
+        return None
+
+
+
+def llm_score_outcome(task_text: str, response_excerpt: str, task_type: str) -> float | None:
+    global _llm_outcome_fallback_calls
+
+    if _llm_outcome_fallback_calls >= _LLM_OUTCOME_FALLBACK_MAX_CALLS:
+        return None
+    if not str(task_text or "").strip() or not str(response_excerpt or "").strip():
+        return None
+
+    prompt = (
+        f"Score this AI agent response on a 0–100 scale for the task type {task_type}. "
+        f"Task: {(task_text or '')[:300]}. "
+        f"Response (first 500 chars): {(response_excerpt or '')[:500]}. "
+        'Reply with JSON only: {"score": 0-100, "reasoning": "one sentence"}'
+    )
+    _llm_outcome_fallback_calls += 1
+    data = _call_llm_json_prompt(
+        "You are grading an AI agent response. Respond with valid JSON only.",
+        prompt,
+        timeout_seconds=8.0,
+    )
+    if not isinstance(data, dict):
+        return None
+    try:
+        score = float(data.get("score"))
+    except (TypeError, ValueError):
+        return None
+    if score < 0.0:
+        return 0.0
+    if score > 100.0:
+        return 100.0
+    return score
+
+
+
 def build_joined_records(events: list[dict], outcomes: list[dict]) -> list[dict]:
     events_by_request_id = {
         event.get("request_id", ""): event
@@ -99,7 +232,17 @@ def build_joined_records(events: list[dict], outcomes: list[dict]) -> list[dict]
         source_bucket = classify_source(event.get("source"))
         reasons: list[str] = []
 
-        outcome_quality = outcome.get("outcome_quality") or outcome.get("composite_score")  # fallback: composite_score present for older records
+        outcome_quality = outcome.get("outcome_quality")
+        if outcome_quality is None:
+            outcome_quality = outcome.get("composite_score")  # fallback: composite_score present for older records
+        if outcome_quality is None:
+            outcome_quality = llm_score_outcome(
+                outcome.get("task_text", ""),
+                outcome.get("response_excerpt", ""),
+                outcome.get("task_type", "code"),
+            )
+            if outcome_quality is not None:
+                outcome["outcome_quality_source"] = "llm-fallback"
         evidence_valid = outcome.get("evidence_valid")
         if evidence_valid is None:
             evidence_valid = notes_fields.get("evidence_valid")

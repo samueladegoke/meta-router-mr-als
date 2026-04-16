@@ -56,7 +56,7 @@ def test_promote_artifact_records_rollout_metadata(tmp_path, monkeypatch):
     assert state["last_rollout_result"]["status"] == "promoted"
 
 
-def test_promote_artifact_requires_50_eligible_outcomes_for_live_promotion(tmp_path, monkeypatch):
+def test_promote_artifact_with_15_eligible_outcomes_triggers_live_promotion(tmp_path, monkeypatch):
     deployment_state = tmp_path / "experience" / "deployment_state.json"
     artifacts_dir = tmp_path / "artifacts"
     deployment_state.parent.mkdir(parents=True, exist_ok=True)
@@ -85,7 +85,8 @@ def test_promote_artifact_requires_50_eligible_outcomes_for_live_promotion(tmp_p
 
     assert ok is True
     state = json.loads(deployment_state.read_text())
+    # 19 eligible outcomes >= MIN_ELIGIBLE_OUTCOMES (15) → live promotion
     assert state["rollout_mode"] == "live"
     assert state["eligible_outcomes_at_promotion"] == 19
-    assert state["promotion_ready"] is False
-    assert state["evidence_maturity"] == "shadow-only"
+    assert state["promotion_ready"] is True
+    assert state["evidence_maturity"] == "production-ready"

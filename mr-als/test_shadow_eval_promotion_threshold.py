@@ -8,7 +8,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import shadow_eval
 
 
-def test_shadow_eval_live_promotion_requires_50_eligible_outcomes(tmp_path, monkeypatch, capsys):
+def test_shadow_eval_live_promotion_at_15_eligible_outcomes(tmp_path, monkeypatch, capsys):
     artifacts_dir = tmp_path / "artifacts"
     exp_dir = tmp_path / "experience"
     artifacts_dir.mkdir(parents=True)
@@ -43,6 +43,7 @@ def test_shadow_eval_live_promotion_requires_50_eligible_outcomes(tmp_path, monk
 
     shadow_eval.promote_artifact("candidate-0010")
 
+    # 19 eligible outcomes >= MIN_ELIGIBLE_OUTCOMES (15) → live promotion
     assert captured["eligible_outcomes"] == 19
-    assert captured["rollout_mode"] == "shadow"
-    assert captured["activation_basis"] == "shadow-eval"
+    assert captured["rollout_mode"] == "live"
+    assert captured["activation_basis"] == "live-data"

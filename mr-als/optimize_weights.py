@@ -24,7 +24,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from experience_hygiene import load_joined_records, summarize_learning_dataset, ELIGIBILITY_POLICY_VERSION
+from experience_hygiene import load_joined_records, summarize_learning_dataset, ELIGIBILITY_POLICY_VERSION, MIN_ELIGIBLE_OUTCOMES
 from meta_router_rules import load_base_rules
 
 MR_DIR = Path("/home/samade10/.openclaw/workspace/skills/maintainer/meta-router")
@@ -34,7 +34,7 @@ SHADOW_SET = EXP_DIR / "shadow_eval_set.json"
 OUTCOMES_JSONL = EXP_DIR / "routing_outcomes.jsonl"
 EVENTS_JSONL = EXP_DIR / "routing_events.jsonl"
 
-MIN_OUTCOMES = 15
+MIN_OUTCOMES = MIN_ELIGIBLE_OUTCOMES  # single source of truth in experience_hygiene.py
 TYPES = ["code", "audit", "research", "production", "integration", "config", "design"]
 TOP_N_CANDIDATES = 3
 

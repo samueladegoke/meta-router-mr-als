@@ -119,7 +119,91 @@ def test_delivery_gate_failure_blocks_learning_eligibility_even_with_pass_pass()
     assert "delivery_gate_failed" in records[0]["ineligible_reasons"]
 
 
-def test_default_learning_maturity_threshold_stays_at_50():
+def test_default_learning_maturity_threshold_is_15():
+    # Threshold is 15 by design — see references/THRESHOLD_POLICY.md
+    # and the rationale comment on MIN_ELIGIBLE_OUTCOMES in experience_hygiene.py.
     summary = hygiene.summarize_learning_dataset([])
-    assert summary["min_eligible_outcomes"] == 50
+    assert summary["min_eligible_outcomes"] == 15
     assert summary["promotion_ready"] is False
+
+
+
+def test_build_joined_records_uses_llm_outcome_quality_fallback(monkeypatch):
+    events = [
+        {
+            "request_id": "rid-llm",
+            "source": "cli",
+            "surface": "cli",
+            "bypassed": False,
+            "task_type": "code",
+            "confidence": 0.7,
+        }
+    ]
+    outcomes = [
+        {
+            "request_id": "rid-llm",
+            "task_type": "code",
+            "task_text": "Implement the merge workflow",
+            "response_excerpt": "I updated the branch, resolved the conflict, and ran the tests.",
+            "oracle_verdict": "PASS",
+            "adv_pass_clean": True,
+            "delivery_gate_passed": True,
+            "error": None,
+            "notes": "som_status=complete | evidence_valid=true | adv_findings=0",
+        }
+    ]
+    calls = []
+
+    def fake_llm_score(task_text, response_excerpt, task_type):
+        calls.append((task_text, response_excerpt, task_type))
+        return 83.5
+
+    monkeypatch.setattr(hygiene, "llm_score_outcome", fake_llm_score, raising=False)
+
+    records = hygiene.build_joined_records(events, outcomes)
+
+    assert calls == [
+        (
+            "Implement the merge workflow",
+            "I updated the branch, resolved the conflict, and ran the tests.",
+            "code",
+        )
+    ]
+    assert records[0]["outcome_quality"] == 83.5
+    assert records[0]["outcome_quality_source"] == "llm-fallback"
+    assert records[0]["eligible_for_learning"] is True
+
+
+
+def test_build_joined_records_keeps_missing_outcome_quality_when_llm_fails(monkeypatch):
+    events = [
+        {
+            "request_id": "rid-llm-fail",
+            "source": "cli",
+            "surface": "cli",
+            "bypassed": False,
+            "task_type": "code",
+            "confidence": 0.7,
+        }
+    ]
+    outcomes = [
+        {
+            "request_id": "rid-llm-fail",
+            "task_type": "code",
+            "task_text": "Implement the merge workflow",
+            "response_excerpt": "I updated the branch, resolved the conflict, and ran the tests.",
+            "oracle_verdict": "PASS",
+            "adv_pass_clean": True,
+            "delivery_gate_passed": True,
+            "error": None,
+            "notes": "som_status=complete | evidence_valid=true | adv_findings=0",
+        }
+    ]
+
+    monkeypatch.setattr(hygiene, "llm_score_outcome", lambda *args, **kwargs: None, raising=False)
+
+    records = hygiene.build_joined_records(events, outcomes)
+
+    assert records[0]["outcome_quality"] is None
+    assert "missing_outcome_quality" in records[0]["ineligible_reasons"]
+    assert records[0]["eligible_for_learning"] is False

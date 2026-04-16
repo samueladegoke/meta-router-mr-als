@@ -167,6 +167,123 @@ def _load_json_file(path: Path) -> dict:
         return {}
 
 
+_LLM_MODEL = "gpt-5.4-mini"
+
+
+def _build_llm_client(timeout_seconds: float):
+    try:
+        from openai import OpenAI
+
+        from agent.auxiliary_client import _to_openai_base_url
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        runtime = resolve_runtime_provider(requested="openai-codex")
+        api_key = str(runtime.get("api_key") or "").strip()
+        if not api_key:
+            return None
+        base_url = _to_openai_base_url(str(runtime.get("base_url") or "").strip())
+        return OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_seconds)
+    except Exception:
+        return None
+
+
+
+def _extract_llm_output_text(response) -> str:
+    text = getattr(response, "output_text", None)
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+
+    output = getattr(response, "output", None)
+    if isinstance(output, list):
+        chunks: list[str] = []
+        for item in output:
+            content = getattr(item, "content", None)
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                part_text = getattr(part, "text", None)
+                if isinstance(part_text, str) and part_text.strip():
+                    chunks.append(part_text.strip())
+        if chunks:
+            return "\n".join(chunks)
+
+    if isinstance(response, dict):
+        text = response.get("output_text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+    return ""
+
+
+
+def _parse_llm_json_payload(text: str) -> dict:
+    payload = (text or "").strip()
+    if not payload:
+        raise ValueError("empty JSON payload")
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        start = payload.find("{")
+        end = payload.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise
+        return json.loads(payload[start:end + 1])
+
+
+
+def _responses_text_input(prompt: str) -> list[dict]:
+    return [{"role": "user", "content": [{"type": "input_text", "text": str(prompt or "")}] }]
+
+
+
+def _stream_llm_text(client, *, instructions: str, prompt: str) -> str:
+    deltas: list[str] = []
+    with client.responses.stream(
+        model=_LLM_MODEL,
+        instructions=instructions,
+        input=_responses_text_input(prompt),
+        reasoning={"effort": "xhigh", "summary": "auto"},
+        service_tier="priority",
+        text={"verbosity": "low"},
+        store=False,
+    ) as stream:
+        for event in stream:
+            event_type = getattr(event, "type", "")
+            if event_type == "response.output_text.delta":
+                delta = getattr(event, "delta", None)
+                if isinstance(delta, str) and delta:
+                    deltas.append(delta)
+        response = stream.get_final_response()
+    text = "".join(deltas).strip()
+    if text:
+        return text
+    return _extract_llm_output_text(response)
+
+
+
+def _call_llm_json_prompt(instructions: str, prompt: str, timeout_seconds: float) -> Optional[dict]:
+    try:
+        client = _build_llm_client(timeout_seconds)
+        if client is None:
+            return None
+        return _parse_llm_json_payload(
+            _stream_llm_text(client, instructions=instructions, prompt=prompt)
+        )
+    except Exception:
+        return None
+
+
+
+def _call_llm_text_prompt(instructions: str, prompt: str, timeout_seconds: float) -> Optional[str]:
+    try:
+        client = _build_llm_client(timeout_seconds)
+        if client is None:
+            return None
+        text = _stream_llm_text(client, instructions=instructions, prompt=prompt).strip()
+        return text or None
+    except Exception:
+        return None
+
 def _summarize_ref(ref_entry: Optional[dict]) -> str:
     if not isinstance(ref_entry, dict):
         return ""
@@ -266,7 +383,13 @@ def format_routed_response(raw_response: str, phase2: Phase2Result, directive: s
         receipt_lines.append("Score gate: PASS")
     elif phase2.delivery_gate_passed is False:
         if phase2.score is not None and phase2.threshold is not None:
-            receipt_lines.append(f"Score gate: FAIL ({phase2.score:.1f} < {phase2.threshold:.1f})")
+            if phase2.score < phase2.threshold:
+                receipt_lines.append(f"Score gate: FAIL ({phase2.score:.1f} < {phase2.threshold:.1f})")
+            else:
+                receipt_lines.append(
+                    f"Score gate: FAIL (delivery gate rejected; "
+                    f"score {phase2.score:.1f} met threshold {phase2.threshold:.1f})"
+                )
         else:
             receipt_lines.append("Score gate: FAIL")
     receipt_lines.append(f"Oracle: {phase2.oracle_verdict}")
@@ -340,19 +463,69 @@ def _scaffold_evidence(state_dir: Path, task_text: str) -> Optional[str]:
 
 
 def _validate_evidence(state_dir: Path) -> tuple[Optional[bool], str]:
-    if not _EVIDENCE_CONTRACT.exists():
-        return None, ""
     try:
-        result = subprocess.run(
-            [sys.executable, str(_EVIDENCE_CONTRACT), "--validate", "--state-dir", str(state_dir)],
-            capture_output=True,
-            text=True,
-            timeout=30,
+        output_path = Path(state_dir) / "output.md"
+        if not output_path.exists():
+            return None, ""
+        output_excerpt = output_path.read_text(encoding="utf-8")[:800].strip()
+        if not output_excerpt:
+            return None, ""
+
+        task_path = Path(state_dir) / "task.txt"
+        task_excerpt = task_path.read_text(encoding="utf-8")[:200].strip() if task_path.exists() else ""
+        prompt = (
+            "Did this AI agent response provide genuine evidence of completing the task? "
+            f"Task: {task_excerpt}. "
+            f"Response excerpt: {output_excerpt}. "
+            'Reply with JSON: {"valid": true/false, "confidence": 0.0-1.0, "reason": "one sentence"}'
         )
-        preview = (result.stderr or result.stdout or "").strip()
-        return result.returncode == 0, preview[:200]
-    except Exception as exc:
-        return None, f"evidence validate exception: {exc}"
+        data = _call_llm_json_prompt(
+            "You judge whether an AI agent response contains genuine completion evidence. Respond with valid JSON only.",
+            prompt,
+            timeout_seconds=8.0,
+        )
+        if not isinstance(data, dict):
+            return None, ""
+
+        valid = data.get("valid")
+        if not isinstance(valid, bool):
+            return None, ""
+        reason = str(data.get("reason") or "").strip()
+        return valid, reason
+    except Exception:
+        return None, ""
+
+
+
+def _enhance_fix_prompt(path: Path, task_text: str, task_type: str, score: Optional[float], threshold: Optional[float]) -> None:
+    original = Path(path)
+    try:
+        fix_content = original.read_text(encoding="utf-8").strip()
+    except Exception:
+        return
+    if not fix_content:
+        return
+
+    instructions = (
+        "You rewrite evaluation feedback into task-specific correction instructions. "
+        "Return only the rewritten fix prompt text."
+    )
+    effective_threshold = threshold or 65
+    prompt = (
+        f"You are reviewing an AI agent's response to this task: {task_text}. "
+        f"The response was evaluated as type {task_type} and scored {score}/{effective_threshold}. "
+        f"The evaluation identified these gaps: {fix_content}. "
+        "Rewrite the fix instructions to be specific to THIS task — reference the actual task goal, "
+        "not generic criteria. Keep it under 200 words."
+    )
+    enhanced = _call_llm_text_prompt(instructions, prompt, timeout_seconds=10.0)
+    if not enhanced:
+        return
+    try:
+        original.write_text(enhanced.strip() + "\n", encoding="utf-8")
+    except Exception:
+        return
+
 
 
 def _run_adv_pass(task_text: str, state_dir: Path, output_path: Path) -> tuple[Optional[bool], Optional[dict], str]:
@@ -689,6 +862,8 @@ def _do_phase2(
             ref_entry = data.get("ref_entry") or delivery_json.get("ref_entry")
             delivery_path = data.get("delivery_path") or (str(delivery_json_path) if delivery_json_path.exists() else None)
             fix_prompt_path = str(fix_prompt) if fix_prompt.exists() else None
+            if fix_prompt_path and som_score is not None and som_score < (threshold or 65):
+                _enhance_fix_prompt(Path(fix_prompt_path), task_text, task_type, som_score, threshold)
             notes.append(f"artifact={routing_artifact_version}")
             if session_id:
                 notes.append(f"session={session_id}")
@@ -810,6 +985,7 @@ def run_outcome_only(
                 som_score=None,
                 eop_score=None,
                 oracle_verdict="SKIPPED",
+                outcome_quality=None,
                 adv_pass_clean=None,
                 latency_ms=latency_ms,
                 error=None,
